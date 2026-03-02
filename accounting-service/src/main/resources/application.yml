@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: accounting-service
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/accounting_db
+    username: ${MYSQL_USER:accounting}
+    password: ${MYSQL_PASSWORD:accounting}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: true
+    open-in-view: false
+
+server:
+  port: 8081
+
+grpc:
+  server:
+    port: 9090
+
+logging:
+  level:
+    com.accountingengine: INFO
+    org.hibernate.SQL: WARN
