@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+option java_multiple_files = true;
+option java_package = "com.accountingengine.common.grpc";
+option java_outer_classname = "LedgerProto";
+
+package ledger;
+
+service LedgerAggregation {
+  rpc GetMonthlyTotals(MonthlyTotalsRequest) returns (MonthlyTotalsResponse);
+}
+
+message MonthlyTotalsRequest {
+  int32 year = 1;
+  int32 month = 2;
+}
+
+message MonthlyTotalsResponse {
+  string revenue_total = 1;  // BigDecimal as string
+  string vat_total = 2;       // BigDecimal as string
+  int32 invoice_count = 3;
+}
