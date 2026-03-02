@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: reporting-service
+
+server:
+  port: 8082
+
+grpc:
+  client:
+    accounting-service:
+      address: dns:///${ACCOUNTING_GRPC_HOST:localhost}:${ACCOUNTING_GRPC_PORT:9090}
+      negotiationType: PLAINTEXT
+
+logging:
+  level:
+    com.accountingengine: INFO
