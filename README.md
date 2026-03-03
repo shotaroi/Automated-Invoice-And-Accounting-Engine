@@ -4,14 +4,32 @@ A **production-style portfolio project** inspired by automated accounting SaaS (
 
 ---
 
+## For Recruiters
+
+| What you'll see | Why it matters |
+|-----------------|----------------|
+| **3 microservices** (invoice, accounting, reporting) | Real-world service decomposition; each owns its data |
+| **REST + gRPC** | Public APIs vs internal; appropriate protocol choice |
+| **Double-entry ledger** | Domain modeling for financial correctness |
+| **Idempotency + optimistic locking** | Production-grade concurrency and retry safety |
+| **Flyway migrations** | Schema-as-code; no surprise DB changes |
+| **Testcontainers** | Integration tests with real MySQL, no mocks |
+| **Maven multi-module** | Clean build structure; shared proto in `common` |
+
+**TL;DR:** Create invoice → add items → send → pay → fetch monthly report. Invoice events drive accounting postings; reporting aggregates via gRPC.
+
+---
+
 ## Table of Contents
 
+- [For Recruiters](#for-recruiters)
 - [Overview](#overview)
 - [What This Demonstrates](#what-this-demonstrates)
 - [Architecture](#architecture)
 - [Domain Model](#domain-model)
 - [API Reference](#api-reference)
 - [Data Flow](#data-flow)
+- [Double-Entry Ledger Example](#double-entry-ledger-example)
 - [Design Decisions](#design-decisions)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
@@ -51,35 +69,88 @@ Each service has its own MySQL database. Internal service-to-service calls use *
 
 ## Architecture
 
+### System Overview
+
+```mermaid
+flowchart TB
+    subgraph Clients["External Clients / Integrations"]
+        CLI[CLI / API Clients]
+        UI[Web / Mobile UI]
+    end
+
+    subgraph Services["Microservices"]
+        subgraph Invoice["invoice-service :8080"]
+            INV[REST API]
+        end
+        subgraph Accounting["accounting-service"]
+            ACC_REST[REST :8081]
+            ACC_GRPC[gRPC :9090]
+        end
+        subgraph Reporting["reporting-service :8082"]
+            RPT[REST API]
+        end
+    end
+
+    subgraph Data["Data Layer"]
+        INV_DB[(invoice_db<br/>MySQL)]
+        ACC_DB[(accounting_db<br/>MySQL)]
+    end
+
+    CLI --> INV
+    UI --> INV
+    CLI --> RPT
+    UI --> RPT
+
+    INV -->|"REST (sync)<br/>POST /post"| ACC_REST
+    RPT -->|"gRPC<br/>GetMonthlyTotals"| ACC_GRPC
+
+    INV --> INV_DB
+    ACC_REST --> ACC_DB
+    ACC_GRPC --> ACC_DB
 ```
-                         ┌─────────────────────────────────────────────────────────────┐
-                         │                    External Clients / Integrations          │
-                         └─────────────────────────────────────────────────────────────┘
-                                                         │
-                              REST                       │                     REST
-                         ┌──────────────┐                │               ┌──────────────┐
-                         │   invoice-   │                │               │  reporting-  │
-                         │   service    │                │               │  service     │
-                         │   :8080      │                │               │  :8082       │
-                         └──────┬───────┘                │               └──────┬───────┘
-                                │                        │                      │
-                                │ REST (sync)            │                      │ gRPC
-                                │ POST /post             │                      │ GetMonthlyTotals
-                                ▼                        │                      ▼
-                         ┌──────────────┐                │               ┌──────────────┐
-                         │  accounting- │◄───────────────┘               │  accounting- │
-                         │  service     │                                │  service     │
-                         │  :8081 REST  │                                │  :9090 gRPC  │
-                         │  :9090 gRPC  │                                └──────────────┘
-                         └──────┬───────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                 ▼
-        ┌──────────┐      ┌──────────┐      ┌────────────┐
-        │ invoice_ │      │accounting│      │ (stateless)│
-        │   db     │      │   _db    │      │ reporting  │
-        │  MySQL   │      │  MySQL   │      │  no DB     │
-        └──────────┘      └──────────┘      └────────────┘
+
+### Request Flow: Invoice Lifecycle
+
+```mermaid
+flowchart LR
+    subgraph Create["1. Create"]
+        A[POST /invoices] --> B[DRAFT]
+    end
+
+    subgraph Edit["2. Edit"]
+        B --> C[POST /items]
+        C --> B
+    end
+
+    subgraph Send["3. Send"]
+        B --> D[POST /send]
+        D --> E[SENT]
+        D --> F[Accounting: INVOICE_SENT<br/>DEBIT AR, CREDIT Revenue+VAT]
+    end
+
+    subgraph Pay["4. Pay"]
+        E --> G[POST /pay]
+        G --> H[PAID]
+        G --> I[Accounting: INVOICE_PAID<br/>DEBIT Cash, CREDIT AR]
+    end
+
+    subgraph Report["5. Report"]
+        J[GET /reports/monthly] --> K[gRPC GetMonthlyTotals]
+        K --> L[Revenue, VAT, Count]
+    end
+```
+
+### Invoice State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> DRAFT
+    DRAFT --> SENT: send
+    DRAFT --> CANCELLED: cancel
+    SENT --> PAID: pay
+    SENT --> CANCELLED: cancel
+    PAID --> [*]
+    CANCELLED --> [*]
 ```
 
 ### Service Summary
@@ -188,6 +259,30 @@ message MonthlyTotalsResponse {
 3. **Send** — `POST /api/invoices/{id}/send` → status SENT; invoice-service calls accounting-service to post INVOICE_SENT (AR + Revenue + VAT)
 4. **Pay** — `POST /api/invoices/{id}/pay` → status PAID; invoice-service calls accounting-service to post INVOICE_PAID (Cash, AR clearance)
 5. **Report** — `GET /api/reports/monthly?year=2025&month=3` → reporting-service calls accounting-service via gRPC `GetMonthlyTotals` → returns aggregated revenue, VAT, invoice count
+
+### Pay Flow (Sequence)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Invoice as invoice-service
+    participant Accounting as accounting-service
+    participant InvDB as invoice_db
+    participant AccDB as accounting_db
+
+    Client->>Invoice: POST /invoices/{id}/pay
+    Invoice->>InvDB: UPDATE invoice SET status=PAID
+    Invoice->>Accounting: POST /post (Idempotency-Key)
+    Accounting->>AccDB: SELECT idempotency_key
+    alt Duplicate key
+        Accounting-->>Invoice: 200 (cached)
+    else New request
+        Accounting->>AccDB: INSERT ledger_entry, ledger_line
+        Accounting->>AccDB: INSERT idempotency_key
+        Accounting-->>Invoice: 200
+    end
+    Invoice-->>Client: 200 OK
+```
 
 ### Error Response Format
 
@@ -359,6 +454,36 @@ The `Jenkinsfile` defines a pipeline that:
 3. Runs unit tests
 4. Runs integration tests (with Testcontainers)
 5. (Optional) Builds Docker images and deploys
+
+---
+
+## Double-Entry Ledger Example
+
+When an invoice for **€1,250** (€1,000 net + €250 VAT) is **SENT**:
+
+```mermaid
+flowchart LR
+    subgraph INVOICE_SENT["INVOICE_SENT posting"]
+        A[DEBIT 1510 AR<br/>€1,250]
+        B[CREDIT 3010 Revenue<br/>€1,000]
+        C[CREDIT 2611 VAT<br/>€250]
+    end
+    A --> B
+    A --> C
+```
+
+When the same invoice is **PAID**:
+
+```mermaid
+flowchart LR
+    subgraph INVOICE_PAID["INVOICE_PAID posting"]
+        D[DEBIT 1910 Cash<br/>€1,250]
+        E[CREDIT 1510 AR<br/>€1,250]
+    end
+    D --> E
+```
+
+**Invariant:** Every ledger entry has `sum(debits) = sum(credits)`.
 
 ---
 
